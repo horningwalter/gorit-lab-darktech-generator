@@ -1,22 +1,38 @@
 """ACE-Step 1.5 renderer (primary stem generator).
 
 ACE-Step is a diffusion text-to-music model. Standard checkpoint is ~3.5 GB and
-runs in <4 GB VRAM on a Colab T4 free; the XL variant needs ~12 GB and is suited
-to A100 with Colab Pro.
+runs in <4 GB VRAM on a Colab T4; the XL variant needs ~12 GB and is suited to
+A100 with Colab Pro.
 
-The official Python package (``ace-step``) exposes ``ACEStepPipeline`` with a
-``generate`` method that accepts a prompt and produces a numpy array. Because the
-package API is still moving (0.x), we keep all interaction confined to this file
-so that future migrations are localized.
+Pipeline API reference (ACE-Step 0.x):
+    ACEStepPipeline(checkpoint_dir, device_id=0, dtype="bfloat16", ...)
+    pipeline(
+        prompt: str,
+        lyrics: str | None,           # we leave None: DarkTech is instrumental
+        audio_duration: float,
+        infer_step: int,
+        guidance_scale: float,
+        manual_seeds: list[int],
+        save_path: str,               # ACE-Step writes WAVs to disk
+        format: str = "wav",
+        ...
+    )
+    -> list[str] + [input_params_json_dict]
+
+The pipeline writes WAVs to ``save_path`` and returns the list of paths. We read
+the WAV back from disk to honor the in-memory :class:`AudioStem` contract.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+import soundfile as sf
 
 from darktech_generator.generation.base import StemRenderer
 from darktech_generator.schemas import AudioStem, StemSpec
@@ -30,13 +46,11 @@ class AceStepRenderer(StemRenderer):
     def __init__(
         self,
         cache_dir: Path,
-        checkpoint: str = "ACE-Step/ACE-Step-v1-3.5B",
-        device: str | None = None,
-        dtype: str = "float16",
+        device_id: int = 0,
+        dtype: str = "bfloat16",
     ) -> None:
         self._cache_dir = cache_dir
-        self._checkpoint = checkpoint
-        self._device = device
+        self._device_id = device_id
         self._dtype_name = dtype
         self._pipeline: Any = None
 
@@ -44,28 +58,25 @@ class AceStepRenderer(StemRenderer):
         if self._pipeline is not None:
             return
         try:
-            import torch
+            import torch  # noqa: F401
         except ImportError as e:
             raise RuntimeError(
                 "torch not installed. Install the [ml] extra: pip install -e '.[ml]'."
             ) from e
 
         ACEStepPipeline = self._import_pipeline()
-
-        device = self._device or ("cuda" if torch.cuda.is_available() else "cpu")
-        dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}[
-            self._dtype_name
-        ]
+        checkpoint_dir = str(self._cache_dir / "ace_step")
+        os.makedirs(checkpoint_dir, exist_ok=True)
         logger.info(
-            "Loading ACE-Step checkpoint=%s on device=%s dtype=%s",
-            self._checkpoint,
-            device,
+            "Loading ACE-Step checkpoint_dir=%s device_id=%d dtype=%s",
+            checkpoint_dir,
+            self._device_id,
             self._dtype_name,
         )
         self._pipeline = ACEStepPipeline(
-            checkpoint_dir=str(self._cache_dir / "ace_step"),
-            dtype=dtype,
-            device=device,
+            checkpoint_dir=checkpoint_dir,
+            device_id=self._device_id,
+            dtype=self._dtype_name,
             torch_compile=False,
         )
 
@@ -75,22 +86,41 @@ class AceStepRenderer(StemRenderer):
 
         seed = spec.seed if spec.seed is not None else int(np.random.randint(0, 2**31 - 1))
 
-        logger.info(
-            "ACE-Step rendering stem=%s duration=%.1fs seed=%d",
-            spec.name,
-            spec.duration_s,
-            seed,
-        )
-        result = self._pipeline(
-            prompt=spec.prompt,
-            negative_prompt=spec.negative_prompt or None,
-            audio_duration=spec.duration_s,
-            guidance_scale=spec.cfg_scale,
-            num_inference_steps=spec.steps,
-            manual_seeds=str(seed),
-        )
+        # ACE-Step writes WAVs to disk. Give it a private temp dir per call so
+        # we don't pile artifacts.
+        with tempfile.TemporaryDirectory(prefix="acestep_render_") as tmp_dir:
+            output_dir = Path(tmp_dir)
+            logger.info(
+                "ACE-Step rendering stem=%s duration=%.1fs seed=%d -> %s",
+                spec.name,
+                spec.duration_s,
+                seed,
+                output_dir,
+            )
+            call_kwargs = {
+                "prompt": spec.prompt,
+                "lyrics": None,
+                "audio_duration": float(spec.duration_s),
+                "infer_step": int(spec.steps),
+                "guidance_scale": float(spec.cfg_scale),
+                "manual_seeds": [int(seed)],
+                "save_path": str(output_dir),
+                "format": "wav",
+            }
+            if spec.reference_audio_path:
+                call_kwargs.update(
+                    audio2audio_enable=True,
+                    ref_audio_input=spec.reference_audio_path,
+                )
+            result = self._pipeline(**call_kwargs)
 
-        samples, sample_rate = self._extract_audio(result)
+        wav_paths = [p for p in self._flatten(result) if isinstance(p, str) and p.endswith(".wav")]
+        if not wav_paths:
+            raise RuntimeError(
+                f"ACE-Step returned no WAV paths; got {type(result).__name__}: {result!r}"
+            )
+
+        samples, sample_rate = self._read_wav(wav_paths[0])
         samples = self._to_float32_stereo(samples)
         actual_duration = samples.shape[-1] / float(sample_rate)
 
@@ -132,19 +162,20 @@ class AceStepRenderer(StemRenderer):
         )
 
     @staticmethod
-    def _extract_audio(result: Any) -> tuple[np.ndarray, int]:
-        """ACE-Step's return shape has shifted across versions; normalize it here."""
-        if isinstance(result, tuple) and len(result) == 2:
-            samples, sample_rate = result
-        elif isinstance(result, dict):
-            samples = result["audio"]
-            sample_rate = int(result.get("sample_rate", 44100))
+    def _flatten(obj: Any) -> list[Any]:
+        """ACE-Step returns ``output_paths + [params_dict]``. Flatten nested lists."""
+        out: list[Any] = []
+        if isinstance(obj, (list, tuple)):
+            for item in obj:
+                out.extend(AceStepRenderer._flatten(item))
         else:
-            samples = result
-            sample_rate = 44100
-        if hasattr(samples, "detach"):
-            samples = samples.detach().cpu().numpy()
-        return np.asarray(samples), int(sample_rate)
+            out.append(obj)
+        return out
+
+    @staticmethod
+    def _read_wav(path: str) -> tuple[np.ndarray, int]:
+        data, sr = sf.read(path, dtype="float32", always_2d=True)
+        return np.asarray(data, dtype=np.float32).T, int(sr)
 
     @staticmethod
     def _to_float32_stereo(samples: np.ndarray) -> np.ndarray:

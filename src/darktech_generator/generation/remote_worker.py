@@ -1,4 +1,4 @@
-"""FastAPI worker that runs *inside* the Colab notebook on the A100.
+"""FastAPI worker that runs *inside* the Colab notebook on the GPU.
 
 The Colab notebook does roughly::
 
@@ -8,12 +8,18 @@ The Colab notebook does roughly::
     import uvicorn
     uvicorn.run(build_app(), host="0.0.0.0", port=8000)
 
-A Cloudflare Tunnel running alongside (``cloudflared tunnel --url http://localhost:8000``)
-publishes a stable HTTPS URL that the local Gradio process points at via
+A Cloudflare Tunnel running alongside (``cloudflared tunnel --url ...``)
+publishes a public HTTPS URL that the local Gradio process points at via
 ``DARKTECH_REMOTE_URL``.
 
-This module imports ACE-Step lazily so that ``import darktech_generator`` stays
-cheap on machines without torch.
+Cloudflare Tunnel kills HTTPS requests after ~100s, which is shorter than any
+realistic ACE-Step generation. To work around that, the worker exposes an async
+job protocol::
+
+    POST /jobs       -> {job_id}                # returns immediately
+    GET  /jobs/{id}  -> {status, progress, ...} # cheap, polled by the client
+
+Generation runs in a background thread; the endpoint just reads job state.
 """
 
 from __future__ import annotations
@@ -22,13 +28,22 @@ import base64
 import io
 import logging
 import os
+import threading
 import time
+import traceback
+import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 import numpy as np
 import soundfile as sf
 
-from darktech_generator.schemas import RemoteGenerateRequest, RemoteGenerateResponse
+from darktech_generator.schemas import (
+    RemoteGenerateRequest,
+    RemoteGenerateResponse,
+    RemoteJobAccepted,
+    RemoteJobStatus,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,19 +68,53 @@ def _encode_wav_b64(samples: np.ndarray, sample_rate: int) -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
+class _JobStore:
+    """Thread-safe in-memory job tracker. Survives only while the worker is up
+    (which is fine: Colab sessions are ephemeral)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._jobs: dict[str, dict[str, Any]] = {}
+
+    def create(self) -> str:
+        job_id = str(uuid.uuid4())
+        with self._lock:
+            self._jobs[job_id] = {
+                "status": "pending",
+                "progress": 0.0,
+                "started_at": None,
+                "finished_at": None,
+                "error": None,
+                "result": None,
+            }
+        return job_id
+
+    def update(self, job_id: str, **fields: Any) -> None:
+        with self._lock:
+            if job_id in self._jobs:
+                self._jobs[job_id].update(fields)
+
+    def get(self, job_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            data = self._jobs.get(job_id)
+            return dict(data) if data is not None else None
+
+
 def build_app() -> Any:
     """Construct the FastAPI app. Imported here so that fastapi stays optional locally."""
     from fastapi import FastAPI, Header, HTTPException
 
-    from darktech_generator.generation.ace_step_renderer import AceStepRenderer
     from darktech_generator.config import get_settings
+    from darktech_generator.generation.ace_step_renderer import AceStepRenderer
 
     settings = get_settings()
     settings.ensure_dirs()
 
     renderer = AceStepRenderer(cache_dir=settings.darktech_cache_dir)
+    jobs = _JobStore()
+    gen_lock = threading.Lock()  # serialize: ACE-Step does not handle parallel calls
 
-    app = FastAPI(title="darktech-remote-worker", version="0.1.0")
+    app = FastAPI(title="darktech-remote-worker", version="0.2.0")
 
     @app.get("/health")
     def health(x_api_key: str | None = Header(default=None)) -> dict[str, Any]:
@@ -86,29 +135,66 @@ def build_app() -> Any:
             pass
         return {"status": "ok", "renderer": "ace_step", "gpu": gpu_info}
 
-    @app.post("/generate", response_model=RemoteGenerateResponse)
-    def generate(
-        request: RemoteGenerateRequest,
-        x_api_key: str | None = Header(default=None),
-    ) -> RemoteGenerateResponse:
-        _verify_api_key(x_api_key)
+    def _run_job(job_id: str, spec_payload: RemoteGenerateRequest) -> None:
+        jobs.update(
+            job_id,
+            status="running",
+            started_at=datetime.now(tz=timezone.utc),
+        )
         started = time.perf_counter()
         try:
-            stem = renderer.render(request.spec)
+            with gen_lock:
+                stem = renderer.render(spec_payload.spec)
+            audio_b64 = _encode_wav_b64(stem.samples, stem.sample_rate)
+            elapsed = time.perf_counter() - started
+            result = RemoteGenerateResponse(
+                audio_b64=audio_b64,
+                sample_rate=stem.sample_rate,
+                channels=int(stem.samples.shape[0]),
+                actual_duration_s=stem.actual_duration_s,
+                seed_used=stem.spec.seed or 0,
+                elapsed_s=elapsed,
+            )
+            jobs.update(
+                job_id,
+                status="done",
+                progress=1.0,
+                finished_at=datetime.now(tz=timezone.utc),
+                result=result,
+            )
+            logger.info("Job %s done in %.1fs", job_id, elapsed)
         except Exception as e:
-            logger.exception("Generation failed for stem=%s", request.spec.name)
-            raise HTTPException(status_code=500, detail=str(e)) from e
+            tb = traceback.format_exc()
+            logger.exception("Job %s failed", job_id)
+            jobs.update(
+                job_id,
+                status="error",
+                finished_at=datetime.now(tz=timezone.utc),
+                error=f"{e}\n{tb}",
+            )
 
-        audio_b64 = _encode_wav_b64(stem.samples, stem.sample_rate)
-        elapsed = time.perf_counter() - started
-        return RemoteGenerateResponse(
-            audio_b64=audio_b64,
-            sample_rate=stem.sample_rate,
-            channels=int(stem.samples.shape[0]),
-            actual_duration_s=stem.actual_duration_s,
-            seed_used=stem.spec.seed or 0,
-            elapsed_s=elapsed,
-        )
+    @app.post("/jobs", response_model=RemoteJobAccepted)
+    def submit_job(
+        request: RemoteGenerateRequest,
+        x_api_key: str | None = Header(default=None),
+    ) -> RemoteJobAccepted:
+        _verify_api_key(x_api_key)
+        job_id = jobs.create()
+        thread = threading.Thread(target=_run_job, args=(job_id, request), daemon=True)
+        thread.start()
+        logger.info("Job %s submitted (stem=%s)", job_id, request.spec.name)
+        return RemoteJobAccepted(job_id=job_id)
+
+    @app.get("/jobs/{job_id}", response_model=RemoteJobStatus)
+    def get_job(
+        job_id: str,
+        x_api_key: str | None = Header(default=None),
+    ) -> RemoteJobStatus:
+        _verify_api_key(x_api_key)
+        data = jobs.get(job_id)
+        if data is None:
+            raise HTTPException(status_code=404, detail=f"Unknown job_id: {job_id}")
+        return RemoteJobStatus(job_id=job_id, **data)
 
     return app
 

@@ -214,6 +214,28 @@ class RemoteGenerateResponse(BaseModel):
     elapsed_s: float = Field(ge=0.0)
 
 
+class RemoteJobAccepted(BaseModel):
+    """Returned by ``POST /jobs``: the job has been queued."""
+
+    job_id: str
+
+
+class RemoteJobStatus(BaseModel):
+    """Returned by ``GET /jobs/{id}``.
+
+    Cloudflare Tunnel kills HTTPS requests after ~100s, so the worker uses an
+    async job protocol: the client submits work and then polls for the result.
+    """
+
+    job_id: str
+    status: Literal["pending", "running", "done", "error"]
+    progress: float = Field(default=0.0, ge=0.0, le=1.0)
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    error: str | None = None
+    result: RemoteGenerateResponse | None = None
+
+
 class RevisionInstructions(BaseModel):
     """Output of the critique loop: which stems to regenerate and how to nudge the prompts."""
 

@@ -12,6 +12,9 @@ Pydantic AI Agent path cannot give us deterministically.
 
 from __future__ import annotations
 
+import json
+import logging
+import re
 from typing import Any
 
 import httpx
@@ -25,6 +28,35 @@ from tenacity import (
 from darktech_generator.config import get_settings
 from darktech_generator.orchestration.cost_tracker import CostTracker
 from darktech_generator.schemas import CostEntry
+
+logger = logging.getLogger(__name__)
+
+
+def _parse_json_tolerant(content: str, operation: str, finish_reason: str) -> dict[str, Any]:
+    """Parse the LLM's JSON output, tolerating common failure modes.
+
+    DeepSeek (and most LLMs) occasionally:
+    - wrap JSON in ```json ... ``` fences;
+    - prepend explanatory text before the opening brace;
+    - get truncated mid-string when finish_reason='length'.
+    """
+    text = content.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    first = text.find("{")
+    last = text.rfind("}")
+    if first != -1 and last > first:
+        text = text[first : last + 1]
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        snippet = content[:400] + ("..." if len(content) > 400 else "")
+        raise RuntimeError(
+            f"DeepSeek returned invalid JSON for {operation} "
+            f"(finish_reason={finish_reason!r}, error={e}). "
+            f"Raw content (first 400 chars): {snippet}"
+        ) from e
 
 
 class DeepSeekClient:
@@ -111,6 +143,5 @@ class DeepSeekClient:
 
         message = data["choices"][0]["message"]
         content = message.get("content", "")
-        import json
-
-        return json.loads(content)
+        finish_reason = data["choices"][0].get("finish_reason", "")
+        return _parse_json_tolerant(content, operation=operation, finish_reason=finish_reason)

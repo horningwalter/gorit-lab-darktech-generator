@@ -64,6 +64,6 @@ class OrchestratorAgent:
             user=user_message,
             operation="plan_track",
             temperature=0.4,
-            max_tokens=2048,
+            max_tokens=4096,
         )
         return TrackPlan.model_validate(raw)

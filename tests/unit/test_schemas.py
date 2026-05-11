@@ -23,6 +23,15 @@ def test_section_energy_bounds() -> None:
         Section(name="x", bars=0)
 
 
+def test_section_drops_unknown_focus_values() -> None:
+    """DeepSeek occasionally invents bus names (vocal, drum). They should be
+    silently dropped rather than rejecting the whole plan."""
+    section = Section.model_validate(
+        {"name": "drop_1", "bars": 32, "focus": ["kick", "vocal", "bass", "drum"]}
+    )
+    assert [b.value for b in section.focus] == ["kick", "bass"]
+
+
 def test_stem_spec_rejects_darktech_literal() -> None:
     with pytest.raises(ValidationError):
         StemSpec(

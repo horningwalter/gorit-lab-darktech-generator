@@ -54,6 +54,23 @@ class Section(BaseModel):
         description="0=ambient, 1=peak. Influences mix automation and stem prompts.",
     )
 
+    @field_validator("focus", mode="before")
+    @classmethod
+    def _drop_unknown_focus(cls, v: object) -> object:
+        """LLMs occasionally hallucinate buses (vocal, drum, etc). Drop them silently
+        instead of rejecting the whole plan; the supported buses cover all DarkTech
+        material."""
+        if not isinstance(v, list):
+            return v
+        allowed = {b.value for b in Bus}
+        kept: list[object] = []
+        for item in v:
+            if isinstance(item, Bus):
+                kept.append(item)
+            elif isinstance(item, str) and item in allowed:
+                kept.append(item)
+        return kept
+
 
 class StemSpec(BaseModel):
     name: str = Field(description="Unique identifier within a TrackPlan (e.g. kick_bus_drop_1).")

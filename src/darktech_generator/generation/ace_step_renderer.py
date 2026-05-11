@@ -45,11 +45,12 @@ class AceStepRenderer(StemRenderer):
             return
         try:
             import torch
-            from acestep.pipeline_ace_step import ACEStepPipeline
         except ImportError as e:
             raise RuntimeError(
-                "ACE-Step dependencies missing. Install with `pip install ace-step torch`."
+                "torch not installed. Install the [ml] extra: pip install -e '.[ml]'."
             ) from e
+
+        ACEStepPipeline = self._import_pipeline()
 
         device = self._device or ("cuda" if torch.cuda.is_available() else "cpu")
         dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}[
@@ -98,6 +99,36 @@ class AceStepRenderer(StemRenderer):
             samples=samples,
             sample_rate=sample_rate,
             actual_duration_s=actual_duration,
+        )
+
+    @staticmethod
+    def _import_pipeline() -> Any:
+        """Try several known import paths for ACE-Step.
+
+        The package layout has changed across releases. We try the most likely
+        modules in order and raise an informative error if none work.
+        """
+        candidates = [
+            ("acestep.pipeline_ace_step", "ACEStepPipeline"),
+            ("acestep.pipeline", "ACEStepPipeline"),
+            ("ace_step.pipeline_ace_step", "ACEStepPipeline"),
+            ("ace_step.pipeline", "ACEStepPipeline"),
+        ]
+        last_error: ImportError | None = None
+        for module_name, attr in candidates:
+            try:
+                module = __import__(module_name, fromlist=[attr])
+                return getattr(module, attr)
+            except ImportError as e:
+                last_error = e
+                continue
+            except AttributeError as e:
+                last_error = ImportError(str(e))
+                continue
+        raise RuntimeError(
+            "ACE-Step not installed or import path unknown. In Colab, run:\n"
+            "  !pip install -q git+https://github.com/ace-step/ACE-Step.git\n"
+            f"Last error: {last_error}"
         )
 
     @staticmethod

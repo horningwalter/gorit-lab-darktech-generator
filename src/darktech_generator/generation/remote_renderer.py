@@ -65,7 +65,7 @@ class RemoteRenderer(StemRenderer):
         for attempt in Retrying(
             stop=stop_after_attempt(3),
             wait=wait_exponential(multiplier=1, min=2, max=20),
-            retry=retry_if_exception_type((httpx.HTTPError, httpx.TimeoutException)),
+            retry=retry_if_exception_type((httpx.TimeoutException, httpx.ConnectError, httpx.ReadError)),
             reraise=True,
         ):
             with attempt, httpx.Client(timeout=self._timeout_s) as client:
@@ -75,7 +75,11 @@ class RemoteRenderer(StemRenderer):
                     json=payload,
                     headers=headers,
                 )
-                resp.raise_for_status()
+                if resp.status_code >= 400:
+                    detail = self._extract_error_detail(resp)
+                    raise RuntimeError(
+                        f"Remote worker returned HTTP {resp.status_code}: {detail}"
+                    )
                 body = RemoteGenerateResponse.model_validate(resp.json())
 
         samples, sample_rate = _decode_wav_b64(body.audio_b64)
@@ -104,6 +108,17 @@ class RemoteRenderer(StemRenderer):
 
     def unload(self) -> None:
         return
+
+    @staticmethod
+    def _extract_error_detail(resp: httpx.Response) -> str:
+        try:
+            data = resp.json()
+            if isinstance(data, dict) and "detail" in data:
+                return str(data["detail"])
+            return str(data)
+        except Exception:
+            text = resp.text or ""
+            return text[:800] if text else "(empty body)"
 
 
 def _decode_wav_b64(b64: str) -> tuple[np.ndarray, int]:

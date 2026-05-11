@@ -1,0 +1,37 @@
+[
+  {
+    "user_prompt": "Crie uma DarkTech 187 BPM, intro atmosférico longo, drop pesado estilo Kindzadza, synth ácido modular.",
+    "expected_output": {
+      "bpm": 187.0,
+      "key": "A minor",
+      "duration_seconds": 360.0,
+      "sections": [
+        {"name": "intro", "bars": 48, "focus": ["atmosphere", "fx"], "energy": 0.25},
+        {"name": "buildup", "bars": 16, "focus": ["bass", "tech", "fx"], "energy": 0.6},
+        {"name": "drop_1", "bars": 64, "focus": ["kick", "bass", "atmosphere", "tech", "lead"], "energy": 0.95},
+        {"name": "break", "bars": 16, "focus": ["atmosphere", "fx"], "energy": 0.4},
+        {"name": "drop_2", "bars": 64, "focus": ["kick", "bass", "atmosphere", "lead"], "energy": 1.0},
+        {"name": "outro", "bars": 16, "focus": ["atmosphere", "fx"], "energy": 0.25}
+      ],
+      "stem_specs": [],
+      "notes": "Inspired by Kindzadza: rolling bass, acid lead, modular synth aesthetic. Long atmospheric intro."
+    }
+  },
+  {
+    "user_prompt": "Faixa 192 BPM mais hitech, percussão tribal pesada estilo Para Halu, atmosfera mínima.",
+    "expected_output": {
+      "bpm": 192.0,
+      "key": "F# minor",
+      "duration_seconds": 330.0,
+      "sections": [
+        {"name": "intro", "bars": 24, "focus": ["percussion", "tech"], "energy": 0.35},
+        {"name": "drop_1", "bars": 64, "focus": ["kick", "bass", "percussion", "tech"], "energy": 0.95},
+        {"name": "break", "bars": 16, "focus": ["percussion", "atmosphere"], "energy": 0.5},
+        {"name": "drop_2", "bars": 72, "focus": ["kick", "bass", "percussion", "tech"], "energy": 1.0},
+        {"name": "outro", "bars": 16, "focus": ["percussion", "fx"], "energy": 0.3}
+      ],
+      "stem_specs": [],
+      "notes": "Para Halu inspired: polyrhythmic tribal percussion forward, atmosphere reduced to minimum, hitech-leaning."
+    }
+  }
+]

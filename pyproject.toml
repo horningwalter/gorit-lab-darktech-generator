@@ -1,0 +1,110 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "darktech-generator"
+version = "0.1.0"
+description = "Gorit Lab DarkTech Generator: AI-assisted generation of DarkTech tracks orchestrated by DeepSeek V4 Pro, running on Google Colab."
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+license = { text = "MIT" }
+authors = [{ name = "Walter Horning", email = "horning.walter@gmail.com" }]
+keywords = ["music", "ai", "darktech", "darkpsy", "hitech", "generative-audio", "colab"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Multimedia :: Sound/Audio",
+]
+
+dependencies = [
+    "pydantic>=2.9,<3",
+    "pydantic-settings>=2.5",
+    "pydantic-ai>=0.0.14",
+    "httpx>=0.27",
+    "tenacity>=9.0",
+    "numpy>=1.26,<2.1",
+    "scipy>=1.13",
+    "soundfile>=0.12",
+    "pydub>=0.25",
+    "librosa==0.10.*",
+    "pedalboard>=0.9",
+    "pyloudnorm>=0.1.1",
+    "diskcache>=5.6",
+    "joblib>=1.4",
+    "rich>=13.7",
+    "structlog>=24.4",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+    "gradio>=5.0",
+]
+
+[project.optional-dependencies]
+ml = [
+    "torch>=2.4,<2.6",
+    "torchaudio>=2.4,<2.6",
+    "transformers>=4.45",
+    "diffusers>=0.30",
+    "accelerate>=0.34",
+    "peft>=0.13",
+    "bitsandbytes>=0.43",
+    "safetensors>=0.4",
+    "huggingface-hub>=0.25",
+    "laion-clap>=1.1.6",
+]
+audio-extra = [
+    "madmom>=0.16.1",
+    "pyrubberband>=0.4.0",
+]
+analysis = [
+    "essentia-tensorflow==2.1b6.dev1110",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pytest-mock>=3.14",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "pre-commit>=3.8",
+]
+
+[project.urls]
+Documentation = "https://github.com/whorning/gorit-lab-darktech-generator"
+Repository = "https://github.com/whorning/gorit-lab-darktech-generator"
+
+[project.scripts]
+darktech-gradio = "darktech_generator.ui.gradio_app:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/darktech_generator"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.11"
+strict_optional = true
+warn_unused_ignores = true
+warn_return_any = true
+files = ["src/darktech_generator/schemas.py", "src/darktech_generator/config.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q --strict-markers"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "gpu: marks tests that require a CUDA GPU",
+    "network: marks tests that require network access (HuggingFace, DeepSeek)",
+]
+asyncio_mode = "auto"
